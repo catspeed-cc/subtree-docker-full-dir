@@ -1,0 +1,112 @@
+
+# docker-compose.yml CPU-only example (inherited by others, offloading automatic)
+services:
+
+  # CONTAINER SERVICE NAME
+  sd-reforge-1:
+    # kept in for development, do not uncomment!
+    #build: .
+    # use the 'latest' image below - if this is 'bleeding' please excuse my
+    # mistake and please change it back to 'latest' or a version 'v*.*.*' for now :)
+    image: catspeedcc/sd-webui-reforge-docker:bleeding
+    # ABOVE image should be on 'latest' or a version 'v*.*.*'
+    environment:                                                            
+      #
+      # This affects the host, not the container. Config is here for ease :)
+      # # SUPER important this variable is set to the service name above (in thi
+      # If you are not using the combined compose file _or_ a cut down install using the v*.*.*-sauces.tar.gz
+      # Leave this the way it is.
+      - IS_CUSTOM_OR_CUTDOWN_INSTALL=false
+    command:
+      - /app/webui-docker.sh
+      - --use-cpu=all
+    ports:
+      #
+      # Below is where we limit to localhost (127.0.0.1)
+      # or change 127.0.0.1->0.0.0.0 but ensure firewalls properly configured!
+      # also ONLY change left side port, do _not_ change the port on the right side
+      #
+      # ===================================================================
+      # Main Application
+      # Exposed only on localhost (127.0.0.1) for security - change only if firewalls are configured correctly
+      # Edit the _published_ port only, it is the port you access from the host
+      - published: 7860
+        target: 7860
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+      # ===================================================================
+      # Exposed only on localhost (127.0.0.1) for security - change only if firewalls are configured correctly
+      # Edit the _published_ port only, it is the port you access from the host
+      # You only need to edit the rest if you want `published` port to be different, or you are changing the host
+      
+      # Space 1
+      - published: 7861
+        target: 7861
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+        
+      # Space 2
+      - published: 7862
+        target: 7862
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+        
+      # Space 3
+      - published: 7863
+        target: 7863
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 4
+      - published: 7864
+        target: 7864
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 5
+      - published: 7865
+        target: 7865
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 6
+      - published: 7866
+        target: 7866
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 7
+      - published: 7867
+        target: 7867
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 8
+      - published: 7868
+        target: 7868
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+
+      # Space 9
+      - published: 7869
+        target: 7869
+        protocol: tcp
+        mode: host
+        host_ip: 127.0.0.1
+           
+      # The reason there are many: load sd-webui-reforge-docker and click "spaces" each of those needs its own port
+      # As a bonus you get fine grained control over which ones get shared to the network or stay local
+      # Done editing, the rest of the file _should_ be fine in most setups with full GitHub repository
+    volumes:
+      - ../../models:/app/webui/models
+      - ../../outputs:/app/webui/outputs
+      - ../../docker:/app/webui/docker
