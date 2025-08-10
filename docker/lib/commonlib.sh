@@ -1,0 +1,537 @@
+
+#
+##
+## Import common functions and startup routines
+##
+## This is not only commonlib it is commoncfg
+## It will initialize & auto configure itself
+##
+## Just "source" the script and you are done
+##
+#
+
+export FDEBUG=true
+
+# DEFAULTS FOR VARIABLES USED (prevents unbound errors for that variable)
+
+: "${FDEBUG:=false}"
+: "${IS_CPU_ONLY:=true}"
+: "${IS_CUDA_ONLY:=false}"
+
+# Disable strict modes to prevent silent exits (STANDARD for this project)
+# Ensure no scripts are called that 'set -e' or if they are it is set back after
+set +e  # Don't exit on command failure
+# Above is critical, it breaks some scripts!
+
+# commented because it is good for debug but spams console
+#set -x  # Trace every command (shows what's running)
+
+# STILL needed: this is a fallback
+# Function to find the Git root directory, ascending up to 6 levels
+# Required for source line to be accurate and work from all locations
+find_git_root() {
+    local current_dir="$(pwd)"
+    local max_levels=6
+    local level=0
+    local dir="$current_dir"
+
+    while [[ $level -le $max_levels ]]; do
+        if [[ -d "$dir/.git" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        # Go up one level
+        dir="$(dirname "$dir")"
+        # If we've reached the root (e.g., /), stop early
+        if [[ "$dir" == "/" ]] || [[ "$dir" == "//" ]]; then
+            break
+        fi
+        ((level++))
+    done
+
+    echo "Error: .git directory not found within $max_levels parent directories." >&2
+    return 1
+}
+
+find_project_root() {
+
+  export PROJECT_ROOT=""
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  # Check if we are inside the 'docker' directory (current path contains /docker)
+  if [[ "$PWD" == *"/docker" || "$PWD" == *"/docker/"* ]] && \
+     [[ -d "./sauce_scripts" && \
+        -d "./compose_files" && \
+        -d "./sauce_scripts_baked_into_docker_image" && \
+        -f "./compose_files/docker-compose.yaml" ]]; then
+      # Confirmed: we are in the correct docker/ directory
+      echo "✅ Running inside valid docker/ directory."
+      export PROJECT_ROOT="$(dirname "$PWD")"
+    
+  # Last resort: check if we can find commonlib.sh relative to current location
+  elif [[ -f "./docker/lib/commonlib.sh" ]]; then
+    echo "✅ Found docker/lib/commonlib.sh — assuming current directory is project root."
+    export PROJECT_ROOT="$PWD"
+  fi
+
+  # Attempt to detect Git root
+  export GIT_ROOT=$(find_git_root)
+
+  # Nested logic: decide PROJECT_ROOT and validate everything in one flow
+  if [[ -n "$GIT_ROOT" && -d "$GIT_ROOT" && -f "$GIT_ROOT/docker/lib/commonlib.sh" ]]; then
+    # Git root is valid AND points to a real SD-Forge project
+    export PROJECT_ROOT="$GIT_ROOT"
+  else
+    # No valid Git root — rely on existing PROJECT_ROOT
+    # If PROJECT_ROOT unset or empty AND directory does not exist
+    if [[ ! -n "$PROJECT_ROOT" && ! -d "$PROJECT_ROOT" ]]; then
+        export GIT_ROOT="error"
+        export PROJECT_ROOT="error"
+    else
+      # OVERRIDE GIT_ROOT
+      GIT_ROOT=$PROJECT_ROOT
+    fi   
+  fi
+  
+  echo "📁 Git root set to: $GIT_ROOT"
+  echo "📁 Project root set to: $PROJECT_ROOT" 
+
+}
+
+# this is needed for re_install_deps too (precedence - init, then use later)
+if nvcc --version > /dev/null 2>&1; then
+    export CUDA_VERSION=$(nvcc --version | sed -n 's/^.*release $$[0-9]\+\.[0-9]\+$$.*$/\1/p')
+    export CUDA_AVAILABLE=true
+else
+    export CUDA_AVAILABLE=false
+    export CUDA_VERSION=""
+fi
+         
+# Wrapper function to install pip packages
+run_pip() {
+  local packages=("$@")  # Accept all arguments as package list
+  echo "Installing packages: ${packages[*]}"
+  
+  pip install "${packages[@]}" && \
+      echo "✅ All packages installed successfully." || \
+      echo "❌ Failed to install one or more packages."
+}         
+         
+check_cuda_and_install_pytorch() {
+    # Initialize variables
+    export CUDA_VERSION="12.8"
+    export IS_CUDA_INSTALLED="false"
+
+    # commented until fixed in future version - not required for working application but nice to have
+    #if [ -x "/usr/local/cuda/bin/nvcc" ]; then
+    #  CUDA_VERSION=$(/usr/local/cuda/bin/nvcc --version | grep -o 'release [0-9.]*' | cut -d' ' -f2)
+    #  if [[ "$CUDA_VERSION" == "12.8" ]]; then
+    #    export CUDA_VERSION IS_CUDA_INSTALLED="true"
+    #    echo "✅ CUDA 12.8 confirmed."
+    #  else
+    #    echo "❌ Found CUDA $CUDA_VERSION, but 12.8 required."
+    #    export IS_CUDA_INSTALLED="false"
+    #  fi
+    #else
+    #  echo "❌ nvcc not found. Please install CUDA 12.8 and ensure /usr/local/cuda/bin is in PATH."
+    #  export IS_CUDA_INSTALLED="false"
+    #fi
+
+    echo "Using CUDA version: $CUDA_VERSION"
+
+    # Build CUDA_TAG *without* exporting yet
+    #export CUDA_TAG="cu${CUDA_VERSION//./}"
+
+    # Now apply default *only if CUDA_TAG is empty or invalid*
+    #if [[ -z "$CUDA_TAG" || "$CUDA_TAG" == "cu" ]]; then
+        #echo "CUDA tag invalid or empty. Defaulting to cu121"
+        echo "Using cu121..."
+        export CUDA_TAG="cu121"
+    #fi
+
+    # Now export and use
+    export CUDA_TAG
+
+    echo "Installing GPU version of PyTorch with $CUDA_TAG..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/$CUDA_TAG
+
+    echo "PyTorch installed with $CUDA_TAG support."
+}
+
+re_install_deps() {
+
+  local REINSTALL="${1:-false}"  # Accept first argument
+
+  if [[ "$REINSTALL" == "true" ]]; then
+    echo""
+    echo "Reinstalling dependencies"
+    export PIP_ADD="--force-reinstall "
+  else
+    echo
+    echo "Installing Dependencies"
+    export PIP_ADD=""
+  fi
+
+  #
+  ##
+  ## Install dependencies IF NOT ALREADY INSTALLED!
+  ##
+  ## The `webui-docker.sh` and `secretsauce.sh` are run inside the container (baked into docker image)
+  ##
+  #
+
+  # quick fix, tell bash we are handling errors (so do not exit) when we really are not xD
+  set +e  # disable exit-on-error
+
+  # change to work directory (herin: "WD")
+  cd /app
+
+  # RATHER than implement extensive logic to only do the deps if they do not exist,
+  # we assume the user only runs init when initializing container, so we can just
+  # rm -r the directory and fetch it again. Quick,clean, simple
+  #
+  # Or perhaps they ran the `docker-reinstall-container-deps.sh` which `docker
+  # exec'd` the `secretsauce.sh` on running container
+  #
+  # cant remove the webui directory to re-clone -- next best: `git pull origin main`
+  # this works because it does not touch the mounted /models and /outputs directories
+  # and there is no compilation needed (appears to be frontend stuff)
+  if [ ! -e "./webui" ]; then
+    git clone https://github.com/lllyasviel/stable-diffusion-webui-forge webui --quiet
+    cd webui
+  else
+    cd webui
+    git pull origin main --quiet
+  fi
+
+  # not erroring on success, but pre-emptive fix from below :)
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore -r requirements_versions.txt
+  exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    echo "⚠️ pip install failed with code $exit_code, but continuing..."
+  fi
+
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore joblib && \
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore --upgrade pip && \
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore "setuptools>=62.4"
+
+  # Make and enter the repositories directory
+  mkdir -p /app/webui/repositories
+  cd /app/webui/repositories
+
+  # IF ANY directory is missing, rm the directories, and git the repositories
+  if [[ ! -d "./stable-diffusion-webui-assets" || ! -d "./huggingface_guess" || ! -d "./BLIP" ]]; then
+
+    echo "One or all three directories missing."
+    echo "Fetching Git repositories into /app/webui/repositories"
+
+    # Either one or all directories are missing. Assume one might exist and clobber all three.
+    # Again I dislike rm -rf (specifically the -f) in production but it is necessary and it is inside the container.
+    rm -rf /app/webui/repositories/stable-diffusion-webui-assets /app/webui/repositories/huggingface_guess /app/webui/repositories/BLIP
+
+    # supress the wall of text warning :-/
+    git config --global advice.detachedHead false
+
+    # modules/launch_utils.py contains the repos and hashes
+    git clone --quiet --config core.filemode=false https://github.com/AUTOMATIC1111/stable-diffusion-webui-assets.git && \
+    git clone --quiet --config core.filemode=false https://github.com/lllyasviel/huggingface_guess.git && \
+    git clone --quiet --config core.filemode=false https://github.com/salesforce/BLIP.git
+
+  # IF ALL directories exist already just enter them and pull origin master/main
+  elif [[ -d "./stable-diffusion-webui-assets" && -d "./huggingface_guess" && -d "./BLIP" ]]; then
+
+    echo "All three directories exist."
+    echo "Git pull origins master/main branches"
+
+    cd stable-diffusion-webui-assets && git pull origin master --quiet && cd ..
+    cd huggingface_guess && git pull origin main --quiet && cd ..
+    cd BLIP && git pull origin main --quiet && cd ..
+
+  # no else we have covered the important considerations
+  fi
+
+  echo "Checkout(ing?) the correct hashes..."
+
+  # sd-webui-assets
+  cd /app/webui/repositories/stable-diffusion-webui-assets && \
+  git checkout 6f7db241d2f8ba7457bac5ca9753331f0c266917 --quiet
+
+  # huggingface_guess
+  cd /app/webui/repositories/huggingface_guess && \
+  git checkout 84826248b49bb7ca754c73293299c4d4e23a548d --quiet
+
+  #
+  # THERE IS A CONFLICT between the requirements.txt for BLIP and the upstream/main requirements.txt
+  #
+  # LIST OF CORRECTED CONFLICTS:
+  #
+  #                              `transformers==4.15.0`->`transformers==4.46.1` # 2025-08-02 @ 12-37 EST resolved by mooleshacat
+  #
+  cd /app/webui/repositories/BLIP && \
+  git checkout 48211a1594f1321b00f14c9f7a5b4813144b2fb9 --quiet
+
+  sed -i 's/transformers==4\.15\.0/transformers==4.46.1/g' /app/webui/repositories/BLIP/requirements.txt
+
+  # fix to exit code (even on success) causing container to exit ...
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore -r requirements.txt
+  exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    echo "⚠️ pip install failed with code $exit_code, but continuing..."
+  fi
+
+  # INSTALL CUDA 12.8 LATEST VERSION - UPDATE TO 12.9 (cu129) when it ships
+  # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+  # do last I think shenannighans happening somewehjre
+  check_cuda_and_install_pytorch
+
+  # INSTALL `insightface` needed for spaces, etc.
+  pip3 install ${PIP_ADD}--no-cache-dir --root-user-action ignore insightface
+  exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    echo "⚠️ pip install failed with code $exit_code, but continuing..."
+  fi
+
+  # change back to webui dir so we can launch `launch.py`
+  cd /app/webui
+
+}
+
+# init_script_paths.sh - Portable script path initialization
+init_script_paths() {
+    local abs_path
+    abs_path=$(readlink -f "$0") || {
+        echo "❌ Error: Cannot resolve script path. Is 'readlink -f' supported?" >&2
+        return 1
+    }
+
+    # Export absolute components
+    export ABS_SCRIPT_PATH="$abs_path"
+    export ABS_SCRIPT_DIR="$(dirname "$abs_path")"
+    export SCRIPT_NAME="$(basename "$abs_path")"
+
+    # Compute REL_SCRIPT_DIR (relative to current working directory)
+    local rel_dir=""
+    if rel_dir=$(realpath --relative-to="$PWD" "$ABS_SCRIPT_DIR" 2>/dev/null); then
+        export REL_SCRIPT_DIR="$rel_dir"
+    elif command -v python3 >/dev/null 2>&1; then
+        export REL_SCRIPT_DIR="$(
+            python3 -c "import os; print(os.path.relpath('$ABS_SCRIPT_DIR', '$PWD'))"
+        )"
+    else
+        # Fallback: basic relative logic
+        if [[ "$ABS_SCRIPT_DIR" == "$PWD" ]]; then
+            export REL_SCRIPT_DIR="."
+        elif [[ "$ABS_SCRIPT_DIR" == "$PWD"/* ]]; then
+            export REL_SCRIPT_DIR="./${ABS_SCRIPT_DIR#$PWD/}"
+        else
+            export REL_SCRIPT_DIR="$ABS_SCRIPT_DIR"
+        fi
+    fi
+
+    # Build full relative script path
+    export REL_SCRIPT_PATH="$REL_SCRIPT_DIR/$SCRIPT_NAME"
+}
+
+confirm_continue() {
+    while true; do
+        read -p "Do you want to continue? [Y/n]: " -r REPLY
+        REPLY=${REPLY:-y}
+
+        case "$REPLY" in
+            [Yy]) break ;;
+            [Nn]) echo "Exiting..."; exit 0 ;;
+            *) echo "Please answer y or n." ;;
+        esac
+    done
+}
+
+end_ps_output() {
+
+  echo""
+  echo "'docker ps' output"
+  docker ps
+  echo
+
+}   
+          
+#
+## If ever this merges upstream, replace the repositories here
+#          
+get_fork_info() {
+
+  # logic to check which fork
+  if [[ "$DOCKER_SERVICE_NAME" == *"sd-forge"* ]]; then
+    export CURRENT_FORK=sd-forge
+    export CURRENT_REPOSITORY=catspeedcc/sd-webui-forge-docker     
+  elif [[ "$DOCKER_SERVICE_NAME" == *"sd-reforge"* ]]; then
+    export CURRENT_FORK=sd-reforge
+    export CURRENT_REPOSITORY=catspeedcc/sd-webui-reforge-docker
+  else
+    echo
+    echo "[Critical Error] Unknown fork!"
+    echo
+    exit 1
+  fi
+
+}
+
+# find the GIT_ROOT or PROJECT_ROOT (set both variables, source common config first time)
+find_project_root
+
+# safely test for commonlib/commoncfg and attempt sourcing it :)
+if [[ -f "$GIT_ROOT/docker/lib/commonlib.sh" && -f "$GIT_ROOT/docker/lib/commoncfg.sh" ]]; then
+  # DO NOT source the lib again, it is already sourced and it would create infinite loop
+  # source the config
+  if ! source "$GIT_ROOT/docker/lib/commoncfg.sh"; then
+    echo "❌ Failed to source commoncfg.sh." >&2
+    echo "   Check sauces archive is installed in project root." >&2
+    echo "   Consult README.md custom/cutdown install or file catspeed-cc issue ticket." >&2
+    exit 1
+  else
+    GIT_ROOT=$PROJECT_ROOT
+  fi
+fi
+
+if [[ "$PROJECT_ROOT" = "error" || "$PROJECT_ROOT" = "error" ]]; then
+  echo "❌ Failed to determine valid GIT_ROOT." >&2
+  echo "❌ Failed to determine valid PROJECT_ROOT." >&2
+  echo "   Neither a Git-controlled SD-Forge repo nor valid PROJECT_ROOT found." >&2
+  echo "   Consult README.md or file catspeed-cc issue ticket." >&2
+  exit 1
+fi     
+             
+#
+##
+## Common Initialization
+##
+#
+
+# Tell sd-forge to use cu121 (moved from webui-docker.sh)
+export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
+export TORCH_COMMAND="python -m pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url ${TORCH_INDEX_URL}"   
+
+# self-initialize, otherwise errors and empty variables below
+init_script_paths
+
+# required because docker set the directory `common_lib` as the prefix for container name
+export COMPOSE_PROJECT_NAME=sd-forge
+
+# SET MANUAL PATHS FIRST (AFTER INIT)!
+export DOCKER_COMPOSE_DIR=${GIT_ROOT}/docker/compose_files
+export SAUCE_DIR=${GIT_ROOT}/docker/sauce_scripts
+export SAUCE_DL_DIR=${GIT_ROOT}/docker/sauces_dl
+export DOCKER_SAUCE_DIR=${GIT_ROOT}/docker/sauce_scripts_baked_into_docker_image
+export WORK_DIR=${GIT_ROOT}/work_dir_tmp
+export IS_CUSTOM_OR_CUTDOWN_INSTALL=$(grep "^[[:space:]]*- IS_CUSTOM_OR_CUTDOWN_INSTALL=" ${DOCKER_COMPOSE_DIR}/docker-compose.cpu.yaml | cut -d '=' -f2)
+export DOCKER_SERVICE_NAME=$(yq '.services | keys[0]' ${DOCKER_COMPOSE_DIR}/docker-compose.cpu.yaml)
+
+export CUDA_TAG="default/none"
+
+# Fork / Repository info can be useful :)
+# SETS: CURRENT_FORK (Ex. sd-forge or sd-reforge)             
+# SETS: CURRENT_REPOSITORY (Ex. catspeedcc/sd-webui-reforge-docker)             
+get_fork_info
+
+# UP HERE check for SD_GPU_DEVICE flags ahead of time, then create flag to toggle GPU flag filtering on/off
+# Set SD_GPU_DEVICE to empty string?
+
+if [[ -z "${SD_GPU_DEVICE+x}" ]] || [[ -z "$SD_GPU_DEVICE" ]]; then
+  echo "SD_GPU_DEVICE is unset or empty. Setting to empty string."
+  export SD_GPU_DEVICE=""
+  # Add other logic here if needed
+  export IS_CPU_ONLY=true
+else
+  export IS_CPU_ONLY=false
+fi
+
+## FIX TO PROBLEM! Ensure we use the variable now if it is set, and pass --gpu-device-id=0
+## ONLY IF IT IS SET !!!!
+# Set CUDA_VISIBLE_DEVICES from safe source
+if [[ -n "${SD_GPU_DEVICE:-}" ]]; then
+  export PYTHON_ADD_ARG=" --gpu-device-id=${SD_GPU_DEVICE}"
+  echo "🔧 Will pass GPU arg:${PYTHON_ADD_ARG}" >&2
+else
+  echo "⚠️  WARNING: SD_GPU_DEVICE not set. Rust be GPU error or perhaps running on CPU-only?" >&2
+  export PYTHON_ADD_ARG=""
+fi
+
+echo
+echo "🚀 Initializing ..."
+echo
+echo "📘 Active Fork: [${CURRENT_FORK}]"   
+echo "📦 Active Repository: [${CURRENT_REPOSITORY}]"   
+echo
+echo "🐞 Debug mode: [${FDEBUG}]"
+echo "🐳 Docker service name: [${DOCKER_SERVICE_NAME}]"
+echo "🌱 Git root found at: [${GIT_ROOT}]"
+echo "⚙️  Custom or cut-down install? [${IS_CUSTOM_OR_CUTDOWN_INSTALL}]"
+echo "🧠 Is CPU only? [${IS_CPU_ONLY}]" 
+
+# below commented, we need to fix them first. Keeping this code. 
+# it works as it is assuming cu121 torch packages (even with cuda 2.8 on host)
+# possible: remove - we can use the IS_CPU_ONLY to tell whether it is "CPU" or not - if not install cu121 torch packages
+# cuda 12.1 has forwards and backwards compatability as nvidia standard. This means 12.1 _should_ support 12.8 host and 12.1 container.
+# Currently I am running cuda 12.8 on host, with cuda 12.1 torch packages inside container (it works)
+#echo "Cuda available: [${CUDA_AVAILABLE}]"
+#echo "Cuda version: [${CUDA_VERSION}]"
+#echo "Cuda tag [${CUDA_TAG}]"
+
+echo
+echo "📜 Script name: [${SCRIPT_NAME}]"
+echo "📍 Absolute script path: [${ABS_SCRIPT_PATH}]"
+echo "🔗 Relative script path: [${REL_SCRIPT_PATH}]"
+echo "📁 Absolute dir: [${ABS_SCRIPT_DIR}]"
+echo "📂 Relative dir: [${REL_SCRIPT_DIR}]"
+echo "💻 Running from: [${PWD}]"
+echo
+echo "🏗️  DOCKER_COMPOSE_DIR: [${DOCKER_COMPOSE_DIR}]"
+echo "🥫 SAUCE_DIR: [${SAUCE_DIR}]"
+echo "🐳 DOCKER_SAUCE_DIR: [${DOCKER_SAUCE_DIR}]"
+echo   
+
+# BEGINNING of GPU related CONFIGURATION AND DEBUG
+# Only execute this GPU related debug if FDEBUG is true and IS_CPU_ONLY is NOT true (false, anything except true = false)
+# Logic confirmed - if CPU is empty or not set -> default true
+#                 - if debug is enabled AND CPU is not = true (assume it is false, safe default)
+if [ "${FDEBUG:-false}" = "true" ] && [ "${IS_CPU_ONLY:-true}" != "true" ] && [ "${IS_CUDA_ONLY:-false}" == "true" ]; then
+  # DEBUG but keep disabled for now... will make debug flag in future update
+  echo "==================="
+  env | grep -E "(CUDA|NVIDIA|SD_GPU)" >&2
+  echo "==================="
+
+  # Always show GPU info so user can adjust their config
+  echo "🔍 SD_GPU_DEVICE: '$SD_GPU_DEVICE'" >&2
+  if [ "$FDEBUG" = "true" ]; then
+    # debug gate, this one might confuse the end user ("I thought I picked X not 0")
+    echo "🔍 NVIDIA_VISIBLE_DEVICES: '$NVIDIA_VISIBLE_DEVICES'" >&2
+  fi
+  echo "🔍 CUDA_DEVICE_ORDER: '$CUDA_DEVICE_ORDER'" >&2
+
+  export CUDA_VISIBLE_DEVICES=${SD_GPU_DEVICE}
+  if [ "$FDEBUG" = true ]; then
+    # Set CUDA_VISIBLE_DEVICES from safe source
+    echo "🔧 CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES" >&2
+  fi
+
+  # 🔍 CRITICAL DEBUG: Verify GPU access before launching Python (KEEP in production! user debug)
+  #    No debug gate, extremely helpful when debugging problems w/ config :)
+  echo "🔍 Running nvidia-smi..." >&2
+  if command -v nvidia-smi >/dev/null; then
+    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv >&2 || true
+  else
+    echo "⚠️  nvidia-smi not found!" >&2
+  fi
+  if [ "$FDEBUG" = true ]; then
+    # For debugging: print filtered args
+    printf "[DEBUG] Filtered args: '%s'\n" "${filtered_args[@]}"
+
+    # TORCH TEST (DEBUG, it failed when GPU bind worked... Remove?)
+    echo
+    echo "TORCH:"
+    python3 -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}');"
+  fi
+fi
+# ENDING of GPU related CONFIGURATION AND DEBUG
+
+# source commoncfg.sh here again because some config happens above
+source ${GIT_ROOT}/docker/lib/commoncfg.sh

@@ -1,0 +1,65 @@
+# docker-compose.combined.nvidia.yaml example
+
+#
+## WARNING: There is no way to combine all GPU, this is to target
+##          one specific GPU out of your multi-gpu setup so other
+##          GPU's can work on other tasks (development?)
+##
+## WARNING: Currently only nvidia supported.
+#
+services:
+
+  # COPY HERE TO END OF FILE TO COPY INTO OTHER DOCKER-COMPOSE
+  sd-forge-1:
+    # use the image below :)
+    image: catspeedcc/sd-webui-forge-docker:latest
+    ports:
+      # This is where we limit to localhost or change 127.0.0.1->0.0.0.0
+      # but ensure firewalls properly configured (security)!
+      - "127.0.0.1:7860:7860"
+      # You will need to put the docker-compose scripts inside a new directory.
+      # Put in root, docker only runs as root without extensive re-configuration
+      # Run inside /root "cd /root && mkdir -p sdwebui-docker_run/models && mkdir -p sdwebui-docker_run/outputs"
+      # Put docker-compose scripts inside /root/sdwebui-docker_run/ directory
+    command:
+      # do not touch, this starts the startup script inside container
+      - /app/webui-docker.sh
+      # SUPER important this variable is set to the service name above (in this case sd-forge)
+      # also you can change it as long as it has "sd-forge" in the name and is unique
+      # NO spaces - use dashes
+      - --docker-container-name=sd-forge-1
+      # ABOVE container service names should match
+      ## ONLY enable if having issues generating images
+      #- --always-low-vram
+      # COMMENT BELOW if you uncomment above
+      - --vae-in-fp32
+      # do not touch below 3 lines, they help :)
+      - --cuda-malloc
+      - --force-upcast-attention
+      - --pin-shared-memory
+    volumes:
+      # The volumes should be OK like this for most custom/slim installations using sauces archive only
+      - ./models:/app/webui/models
+      - ./outputs:/app/webui/outputs
+      - ./docker/lib/commonlib.sh:/app/webui/lib/commonlib.sh
+    runtime: nvidia
+    environment:
+      # DO NOT TOUCH THIS ENSURES SAME ORDER EVERY TIME
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      # SET THIS TO THE GPU YOU WANT (index from host system nvidia-smi)
+      CUDA_VISIBLE_DEVICES: 1
+      # SET THIS TO THE GPU YOU WANT (index from host system nvidia-smi)
+      NVIDIA_VISIBLE_DEVICES: 1
+      # KEEP THIS UNCOMMENTED AND 0 IF YOU JUST SPECIFIED GPU INDEX ABOVE
+      # IF SINGLE GPU SYSTEM BOTTOM 3 of 4 COULD POSSIBLY BE COMMENTED
+      SD_GPU_DEVICE: 0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    # CHANGE BELOW TO YOUR GPU VRAM (IF UNSURE COMMENT IT OUT!)
+    shm_size: '8gb'
+  # END OF FILE
